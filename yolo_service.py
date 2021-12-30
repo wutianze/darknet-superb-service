@@ -91,6 +91,7 @@ class DarknetService:
             #print("get one image")
             newFrame = SuperbFrame()
             newFrame.image = image
+            darknet.copy_image_from_bytes(newFrame.darknet_image,cv2.resize(image,(DarknetService.darknet_width,DarknetService.darknet_height),interpolation=cv2.INTER_LINEAR).tobytes())
             newFrame.recv_timestamp = 0 # fill sth
             newFrame.send_timestamp = 0 # fill sth
             
