@@ -5,7 +5,7 @@ import struct
 import sys
 import base64
 import json
-from jtracer import init_tracer
+from jtracer.tracing import init_tracer
 from queue import Queue
 import pynng
 from PIL import Image
