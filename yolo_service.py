@@ -1,9 +1,9 @@
 import darknet
 import cv2
-import asyncio
 import time
 import struct
 import sys
+import base64
 from queue import Queue
 from PIL import Image
 
@@ -40,6 +40,8 @@ class SuperbFrame:
         self.recv_timestamp = 0
         self.send_timestamp = 0
         self.inference_time = 0
+        self.final_image = None
+        self.bytes = None
 
 class DarknetService:
     network,class_names,class_colors = darknet.load_network(
@@ -57,7 +59,7 @@ class DarknetService:
 
         self.keep_alive = True
         
-    async def get_image_online(self,input_address):
+    def get_image_online(self,input_address):
         with pynng.Pair1(recv_timeout=100,send_timeout=100) as sock:
             sock.listen(input_address)
             while self.keep_alive:
@@ -108,7 +110,7 @@ class DarknetService:
             return
 
 
-    async def keep_inference(self):
+    def keep_inference(self):
         while self.keep_alive:
             try:
                 newFrame = self.input_queue.get(block=False,timeout=1)
@@ -116,15 +118,16 @@ class DarknetService:
                 print("input_queue empty")
                 continue
             prev_time = time.time()
-            newFrame.results = darknet.detect_image(DarknetService.network, DarknetService.class_names, newFrame.image, thresh=0.2)
+            newFrame.results = darknet.detect_image(DarknetService.network, DarknetService.class_names, newFrame.darknet_image, thresh=0.2)
             newFrame.inference_time = int((time.time()-prev_time)*1000.0) # s -> ms
+            darknet.free_image(newFrame.darknet_image)
             try:
                 self.result_queue.put(newFrame,block=False,timeout=1)
             except:
                 print("result_queue is full, discard current msg")
                 continue
 
-    def generate_output(self):
+    def generate_output(self,need_bytes,resizew=960,resizeh=480):
         while self.keep_alive:
             try:
                 newFrame = self.result_queue.get(block=False,timeout=1)
@@ -136,14 +139,21 @@ class DarknetService:
                     bbox_adjusted = convert2original(newFrame.image, bbox)
                     detections_adjusted.append((str(label), confidence, bbox_adjusted))
                 image = darknet.draw_boxes(detections_adjusted, newFrame.image, DarknetService.class_colors)
-                return cv2.cvtColor(image,cv2.COLOR_BGR2RGB)
+                cv2.cvtColor(image,cv2.COLOR_BGR2RGB)
+                newFrame.final_image = image
+                if need_bytes:
+                    Image.fromarray(image).resize((resizew,resizeh))
+                    img_byte_arr = io.BytesIO()
+                    image.save(img_byte_arr, format='PNG')
+                    img_byte_arr.seek(0)
+                    newFrame.bytes = base64.b64encode(img_byte_arr.read()).decode()
+                return newFrame
+            else:
+                continue
 
 if __name__ == "__main__":
     ds = DarknetService()
     ds.get_image_from_file(str(sys.argv[1]))
     ds.inference()
-    final_image = ds.generate_output()
-    cv2.imwrite("dr.png",final_image)
-    #cv2.imshow("Image",final_image)
-    #cv2.waitKey (0)  
-    #cv2.destroyAllWindows()
+    final_image = ds.generate_output(False)
+    cv2.imwrite("dr.png",final_image.final_image)
