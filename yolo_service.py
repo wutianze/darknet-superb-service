@@ -4,8 +4,12 @@ import time
 import struct
 import sys
 import base64
+import json
+from jtracer import init_tracer
 from queue import Queue
+import pynng
 from PIL import Image
+from opentracing.propagation import Format
 
 def convert2relative(bbox):
     """
@@ -42,6 +46,7 @@ class SuperbFrame:
         self.inference_time = 0
         self.final_image = None
         self.bytes = None
+        self.span = None
 
 class DarknetService:
     network,class_names,class_colors = darknet.load_network(
@@ -56,35 +61,51 @@ class DarknetService:
     def __init__(self):
         self.input_queue = Queue(maxsize=3)
         self.result_queue = Queue(maxsize=3)
+        self.tracer = init_tracer("image-process")
 
         self.keep_alive = True
+        self.sock = None
+    
+    def _parse_data(self,data):
+        head_length, msg_length = struct.unpack("ii", data[0:8])
+        head_length, msg_length, msg_head, msg = struct.unpack("ii"+ str(head_length) + "s" + str(msg_length) + "s", data)
         
+        if head_length > 2: 
+            span_dict = json.loads(msg_head)
+            span_ctx = self.tracer.extract(Format.TEXT_MAP, span_dict)
+            return span_ctx, msg
+        else:
+            return None, msg
+            
     def get_image_online(self,input_address):
-        with pynng.Pair1(recv_timeout=100,send_timeout=100) as sock:
-            sock.listen(input_address)
-            while self.keep_alive:
-                try:
-                    msg = sock.recv()
-                except pynng.Timeout:
-                    continue
-                recv_time = time.time()
-                #print("get one image")
-                newFrame = SuperbFrame()
-                newFrame.recv_timestamp = int(recv_time*1000.0) # in ms
+        self.sock = pynng.Pair1(recv_timeout=100,send_timeout=100) 
+        self.sock.listen(input_address)
+        while self.keep_alive:
+            try:
+                msg = self.sock.recv()
+            except pynng.Timeout:
+                continue
+            recv_time = time.time()
+            #print("get one image")
+            newFrame = SuperbFrame()
+            newFrame.recv_timestamp = int(recv_time*1000.0) # in ms
 
-                # msg handling
-                header = msg[0:24]
-                hh,ww,cc,tt = struct.unpack('iiid',header)
-                newFrame.send_timestamp = int(tt*1000.0)
-                hh,ww,cc,tt,ss = struct.unpack('iiid'+str(hh*ww*cc)+'s',msg)
+            # msg handling
+            span_ctx, msg_content = self._parse_data(msg)
+            if span_ctx is not None:
+                newFrame.span = self.tracer.start_span('image_procss',child_of=span_ctx)
+            header = msg_content[0:24]
+            hh,ww,cc,tt = struct.unpack('iiid',header)
+            newFrame.send_timestamp = int(tt*1000.0)
+            hh,ww,cc,tt,ss = struct.unpack('iiid'+str(hh*ww*cc)+'s',msg_content)
 
-                newFrame.image = cv2.cvtColor((np.frombuffer(ss,dtype=np.uint8)).reshape(hh,ww,cc), cv2.COLOR_BGR2RGB)
-                darknet.copy_image_from_bytes(newFrame.darknet_image,cv2.resize(newFrame.image,(DarknetService.darknet_width,DarknetService.darknet_height),interpolation=cv2.INTER_LINEAR).tobytes())
-                try:
-                    self.input_queue.put(newFrame,block=False,timeout=1)
-                except:
-                    print("input_queue is full, discard current msg")
-                    continue
+            newFrame.image = cv2.cvtColor((np.frombuffer(ss,dtype=np.uint8)).reshape(hh,ww,cc), cv2.COLOR_BGR2RGB)
+            darknet.copy_image_from_bytes(newFrame.darknet_image,cv2.resize(newFrame.image,(DarknetService.darknet_width,DarknetService.darknet_height),interpolation=cv2.INTER_LINEAR).tobytes())
+            try:
+                self.input_queue.put(newFrame,block=False,timeout=1)
+            except:
+                print("input_queue is full, discard current msg")
+                continue
 
     def get_image_from_file(self,file_address):
         if self.keep_alive:
@@ -120,6 +141,12 @@ class DarknetService:
             prev_time = time.time()
             newFrame.results = darknet.detect_image(DarknetService.network, DarknetService.class_names, newFrame.darknet_image, thresh=0.2)
             newFrame.inference_time = int((time.time()-prev_time)*1000.0) # s -> ms
+            if newFrame.span is not None:
+                index = newFrame.span.get_baggage_item('index')
+                try:
+                    self.sock.send(index.encode())
+                except pynng.Timeout:
+                    print("Error: span reply fail")
             darknet.free_image(newFrame.darknet_image)
             try:
                 self.result_queue.put(newFrame,block=False,timeout=1)
