@@ -3,10 +3,11 @@ import cv2
 import time
 import struct
 import sys
+import numpy as np
 import base64
 import json
 from jtracer.tracing import init_tracer
-from queue import Queue
+from multiprocessing import Queue
 import pynng
 from PIL import Image
 from opentracing.propagation import Format
@@ -79,14 +80,16 @@ class DarknetService:
             
     def get_image_online(self,input_address):
         self.sock = pynng.Pair1(recv_timeout=100,send_timeout=100) 
+        input_address = "tcp://0.0.0.0:10778"
         self.sock.listen(input_address)
         while self.keep_alive:
             try:
                 msg = self.sock.recv()
             except pynng.Timeout:
+                print("cannot recv")
                 continue
             recv_time = time.time()
-            #print("get one image")
+            print("get one image")
             newFrame = SuperbFrame()
             newFrame.recv_timestamp = int(recv_time*1000.0) # in ms
 
@@ -94,6 +97,7 @@ class DarknetService:
             span_ctx, msg_content = self._parse_data(msg)
             if span_ctx is not None:
                 newFrame.span = self.tracer.start_span('image_procss',child_of=span_ctx)
+            print("span fini")
             header = msg_content[0:24]
             hh,ww,cc,tt = struct.unpack('iiid',header)
             newFrame.send_timestamp = int(tt*1000.0)
@@ -101,8 +105,10 @@ class DarknetService:
 
             newFrame.image = cv2.cvtColor((np.frombuffer(ss,dtype=np.uint8)).reshape(hh,ww,cc), cv2.COLOR_BGR2RGB)
             darknet.copy_image_from_bytes(newFrame.darknet_image,cv2.resize(newFrame.image,(DarknetService.darknet_width,DarknetService.darknet_height),interpolation=cv2.INTER_LINEAR).tobytes())
+            print("fuck")
             try:
-                self.input_queue.put(newFrame,block=False,timeout=1)
+                self.input_queue.put(newFrame,block=False,timeout=100)
+                print("put in")
             except:
                 print("input_queue is full, discard current msg")
                 continue
@@ -130,14 +136,14 @@ class DarknetService:
             self.result_queue.put(newFrame)
             return
 
-
     def keep_inference(self):
         while self.keep_alive:
             try:
-                newFrame = self.input_queue.get(block=False,timeout=1)
+                newFrame = self.input_queue.get(block=False,timeout=100)
             except:
-                print("input_queue empty")
+                #print("input_queue empty")
                 continue
+            print("inference get")
             prev_time = time.time()
             newFrame.results = darknet.detect_image(DarknetService.network, DarknetService.class_names, newFrame.darknet_image, thresh=0.2)
             newFrame.inference_time = int((time.time()-prev_time)*1000.0) # s -> ms
