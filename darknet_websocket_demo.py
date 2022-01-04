@@ -224,7 +224,6 @@ async def stream_handler(websocket: WebSocket, port: str):
     result_queue = Queue(maxsize=3)
     send_queue = Queue(maxsize=3)
     input_address = "tcp://0.0.0.0:"+port
-    input_address = "tcp://0.0.0.0:10778"
     keep_alive = True
     p0 = Process(target=send_then_recv,args=(input_address,send_queue,input_queue,tracer,darknet_width,darknet_height,keep_alive))
     p1 = Process(target=keep_inference,args=(send_queue,input_queue,result_queue,network,class_names,keep_alive))
