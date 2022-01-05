@@ -172,6 +172,7 @@ def keep_inference(send_queue,input_queue,result_queue,network,class_names,keep_
         darknet.free_image(newFrame.darknet_image)
         if newFrame.span is not None:
             index = newFrame.span.get_baggage_item('index')
+            newFrame.span.finish()
             try:
                 send_queue.put(index.encode())
                 #sock.send(index.encode())
