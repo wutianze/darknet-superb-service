@@ -121,7 +121,7 @@ def send_then_recv(input_address,send_queue,input_queue,tracer,darknet_width,dar
     sock.listen(input_address)
     while keep_alive:
         try:
-            span_reply = send_queue.get(block=False,timeout=100)
+            span_reply = send_queue.get(block=False,timeout=20)
             sock.send(span_reply)
         except pynng.Timeout:
             print("sock.send timeout")
