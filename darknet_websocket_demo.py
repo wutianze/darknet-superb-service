@@ -157,6 +157,7 @@ def send_then_recv(input_address,send_queue,input_queue,tracer,darknet_width,dar
         except:
             print("input_queue is full, discard current msg")
             continue
+    sock.close()
 
 def keep_inference(send_queue,input_queue,result_queue,network,class_names,keep_alive):
     while keep_alive:
