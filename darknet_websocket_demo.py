@@ -96,6 +96,7 @@ def get_port(request:Request):
     while True:
         manager.port_lock.acquire()
         port_tmp = random.randint(10000,20000)
+        port_tmp = 10778
         if port_tmp in manager.ports or port_is_used(port_tmp):
             manager.port_lock.release()
             continue
@@ -130,10 +131,10 @@ def send_then_recv(input_address,send_queue,input_queue,tracer,darknet_width,dar
         try:
             msg = sock.recv()
         except pynng.Timeout:
-            print("cannot recv")
+            #print("cannot recv")
             continue
         recv_time = time.time()
-        print("get one image")
+        #print("get one image")
         newFrame = SuperbFrame(darknet_height,darknet_width)
         newFrame.recv_timestamp = int(recv_time*1000.0) # in ms
 
@@ -141,7 +142,7 @@ def send_then_recv(input_address,send_queue,input_queue,tracer,darknet_width,dar
         span_ctx, msg_content = parse_data(msg)
         if span_ctx is not None:
             newFrame.span = tracer.start_span('image_procss',child_of=span_ctx)
-        print("span fini")
+        #print("span fini")
         header = msg_content[0:24]
         hh,ww,cc,tt = struct.unpack('iiid',header)
         newFrame.send_timestamp = int(tt*1000.0)
@@ -149,10 +150,10 @@ def send_then_recv(input_address,send_queue,input_queue,tracer,darknet_width,dar
 
         newFrame.image = cv2.cvtColor((np.frombuffer(ss,dtype=np.uint8)).reshape(hh,ww,cc), cv2.COLOR_BGR2RGB)
         darknet.copy_image_from_bytes(newFrame.darknet_image,cv2.resize(newFrame.image,(darknet_width,darknet_height),interpolation=cv2.INTER_LINEAR).tobytes())
-        print("fuck")
+        #print("fuck")
         try:
             input_queue.put(newFrame,block=False,timeout=100)
-            print("put in")
+            #print("put in")
         except:
             print("input_queue is full, discard current msg")
             continue
@@ -164,7 +165,7 @@ def keep_inference(send_queue,input_queue,result_queue,network,class_names,keep_
         except:
             #print("input_queue empty")
             continue
-        print("inference get")
+        #print("inference get")
 
         prev_time = time.time()
         newFrame.results = darknet.detect_image(network, class_names, newFrame.darknet_image, thresh=0.2)
