@@ -96,6 +96,7 @@ def get_port(request:Request):
     while True:
         manager.port_lock.acquire()
         port_tmp = random.randint(10000,20000)
+        port_tmp = 10778
         if port_tmp in manager.ports or port_is_used(port_tmp):
             manager.port_lock.release()
             continue
