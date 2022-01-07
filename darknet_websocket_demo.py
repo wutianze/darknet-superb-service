@@ -16,6 +16,7 @@ import cv2
 import time
 import io
 import struct
+import os
 import numpy as np
 import base64
 import json
@@ -96,8 +97,7 @@ manager = ConnectionManager()
 def get_port(request:Request):
     while True:
         manager.port_lock.acquire()
-        port_tmp = random.randint(10000,20000)
-        #port_tmp = 10778
+        port_tmp = random.randint(int(os.getenv("SUPB_MIN_PORT")),int(os.getenv("SUPB_MAX_PORT")))
         if port_tmp in manager.ports or port_is_used(port_tmp):
             manager.port_lock.release()
             continue
@@ -131,13 +131,13 @@ def send_then_recv(input_address,send_queue,input_queue,tracer,darknet_width,dar
     #sock = pynng.Pair1(recv_timeout=100,send_timeout=100) 
     #sock.listen(input_address)
     while keep_alive:
-        try:
-            span_reply = send_queue.get(block=False,timeout=20)
-            sock.send(span_reply)
-        except pynng.Timeout:
-            print("sock.send timeout")
-        except:
-            pass # no msg to send
+        #try:
+        #    span_reply = send_queue.get(block=False,timeout=20)
+        #    sock.send(span_reply)
+        #except pynng.Timeout:
+        #    print("sock.send timeout")
+        #except:
+        #    pass # no msg to send
 
         try:
             msg = sock.recv()
@@ -185,7 +185,7 @@ def keep_inference(send_queue,input_queue,result_queue,network,class_names,keep_
             newFrame.span.finish()
             try:
                 send_queue.put(index.encode())
-                sock.send(index.encode())
+                #sock.send(index.encode())
             except:
                 print("send_queue is full, discard current msg")
         try:
@@ -262,4 +262,4 @@ async def stream_handler(websocket: WebSocket, port: str):
 
             
 if __name__ == "__main__":
-    uvicorn.run("darknet_websocket_demo:app",host="0.0.0.0",port=11935,log_level="info")
+    uvicorn.run("darknet_websocket_demo:app",host="0.0.0.0",port=int(os.getenv("SUPB_SERVICE_PORT")),log_level="info")
