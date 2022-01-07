@@ -1,7 +1,8 @@
 from ctypes import *
-from multiprocessing import Process, Queue
+#from multiprocessing import Process, Queue
+import queue
 import time
-from threading import Lock
+from threading import Lock,Thread
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi import WebSocket, WebSocketDisconnect
@@ -52,8 +53,8 @@ def convert2original(image, bbox,darknet_height,darknet_width):
 class SuperbFrame:
     def __init__(self,darknet_height,darknet_width):
         self.image = None
-        self.darknet_image = darknet.make_image(darknet_width,darknet_height,3)
         self.results = None
+        self.darknet_image = darknet.make_image(darknet_width,darknet_height,3)
         self.recv_timestamp = 0
         self.send_timestamp = 0
         self.inference_time = 0
@@ -96,7 +97,7 @@ def get_port(request:Request):
     while True:
         manager.port_lock.acquire()
         port_tmp = random.randint(10000,20000)
-        port_tmp = 10778
+        #port_tmp = 10778
         if port_tmp in manager.ports or port_is_used(port_tmp):
             manager.port_lock.release()
             continue
@@ -115,10 +116,20 @@ def parse_data(data,tracer):
         return span_ctx, msg
     else:
         return None, msg
+def send_index(send_queue, sock,keep_alive):
+    while keep_alive:
+        try:
+            span_reply = send_queue.get(block=False,timeout=20)
+            sock.send(span_reply)
+        except pynng.Timeout:
+            print("sock.send timeout")
+        except:
+            pass # no msg to send
 
-def send_then_recv(input_address,send_queue,input_queue,tracer,darknet_width,darknet_height,keep_alive):
-    sock = pynng.Pair1(recv_timeout=100,send_timeout=100) 
-    sock.listen(input_address)
+
+def send_then_recv(input_address,send_queue,input_queue,tracer,darknet_width,darknet_height,sock,keep_alive):
+    #sock = pynng.Pair1(recv_timeout=100,send_timeout=100) 
+    #sock.listen(input_address)
     while keep_alive:
         try:
             span_reply = send_queue.get(block=False,timeout=20)
@@ -133,7 +144,6 @@ def send_then_recv(input_address,send_queue,input_queue,tracer,darknet_width,dar
         except pynng.Timeout:
             continue
         recv_time = time.time()
-        print("get one image")
         newFrame = SuperbFrame(darknet_height,darknet_width)
         newFrame.recv_timestamp = int(recv_time*1000.0) # in ms
 
@@ -141,6 +151,7 @@ def send_then_recv(input_address,send_queue,input_queue,tracer,darknet_width,dar
         span_ctx, msg_content = parse_data(msg,tracer)
         if span_ctx is not None:
             newFrame.span = tracer.start_span('image_procss',child_of=span_ctx)
+        
         header = msg_content[0:24]
         hh,ww,cc,tt = struct.unpack('iiid',header)
         newFrame.send_timestamp = int(tt*1000.0)
@@ -148,22 +159,22 @@ def send_then_recv(input_address,send_queue,input_queue,tracer,darknet_width,dar
 
         newFrame.image = cv2.cvtColor((np.frombuffer(ss,dtype=np.uint8)).reshape(hh,ww,cc), cv2.COLOR_BGR2RGB)
         darknet.copy_image_from_bytes(newFrame.darknet_image,cv2.resize(newFrame.image,(darknet_width,darknet_height),interpolation=cv2.INTER_LINEAR).tobytes())
-        if span_ctx is not None:
-            newFrame.span.finish()
+        #if span_ctx is not None:
+        #    newFrame.span.finish()
         try:
             input_queue.put(newFrame,block=False,timeout=100)
         except:
             print("input_queue is full, discard current msg")
             continue
-    sock.close()
 
 def keep_inference(send_queue,input_queue,result_queue,network,class_names,keep_alive):
     while keep_alive:
         try:
+            #print("get newFrame")
             newFrame = input_queue.get(block=False,timeout=100)
         except:
+            #print("inference get fail")
             continue
-        print("inference get")
 
         prev_time = time.time()
         newFrame.results = darknet.detect_image(network, class_names, newFrame.darknet_image, thresh=0.2)
@@ -171,14 +182,14 @@ def keep_inference(send_queue,input_queue,result_queue,network,class_names,keep_
         darknet.free_image(newFrame.darknet_image)
         if newFrame.span is not None:
             index = newFrame.span.get_baggage_item('index')
-            #newFrame.span.finish()
+            newFrame.span.finish()
             try:
                 send_queue.put(index.encode())
-                #sock.send(index.encode())
+                sock.send(index.encode())
             except:
                 print("send_queue is full, discard current msg")
         try:
-            result_queue.put(newFrame,block=False,timeout=1)
+            result_queue.put(newFrame,block=False,timeout=10)
         except:
             print("result_queue is full, discard current msg")
             continue
@@ -186,7 +197,7 @@ def keep_inference(send_queue,input_queue,result_queue,network,class_names,keep_
 def generate_output(result_queue,need_bytes,keep_alive,class_colors,darknet_height,darknet_width,resizew=960,resizeh=480):
     while keep_alive:
         try:
-            newFrame = result_queue.get(block=False,timeout=1)
+            newFrame = result_queue.get(block=False,timeout=30)
         except:
             continue
         detections_adjusted = []
@@ -198,9 +209,9 @@ def generate_output(result_queue,need_bytes,keep_alive,class_colors,darknet_heig
             cv2.cvtColor(image,cv2.COLOR_BGR2RGB)
             newFrame.final_image = image
             if need_bytes:
-                Image.fromarray(image).resize((resizew,resizeh))
+                img = Image.fromarray(image).resize((resizew,resizeh))
                 img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format='PNG')
+                img.save(img_byte_arr, format='PNG')
                 img_byte_arr.seek(0)
                 newFrame.bytes = base64.b64encode(img_byte_arr.read()).decode()
             return newFrame
@@ -220,15 +231,20 @@ async def stream_handler(websocket: WebSocket, port: str):
     darknet_height = darknet.network_height(network)
 
     tracer = init_tracer("image-process")
-    input_queue = Queue(maxsize=3)
-    result_queue = Queue(maxsize=3)
-    send_queue = Queue(maxsize=3)
+    input_queue = queue.Queue(maxsize=5)
+    result_queue = queue.Queue(maxsize=5)
+    send_queue = queue.Queue(maxsize=5)
     input_address = "tcp://0.0.0.0:"+port
+    sock = pynng.Pair1(recv_timeout=100,send_timeout=100) 
+    sock.listen(input_address)
+
     keep_alive = True
-    p0 = Process(target=send_then_recv,args=(input_address,send_queue,input_queue,tracer,darknet_width,darknet_height,keep_alive))
-    p1 = Process(target=keep_inference,args=(send_queue,input_queue,result_queue,network,class_names,keep_alive))
+    p0 = Thread(target=send_then_recv,args=(input_address,send_queue,input_queue,tracer,darknet_width,darknet_height,sock,keep_alive))
+    p1 = Thread(target=keep_inference,args=(send_queue,input_queue,result_queue,network,class_names,keep_alive))
+    p2 = Thread(target=send_index,args=(send_queue,sock,keep_alive))
     p0.start()
     p1.start()
+    p2.start()
     try:
         while keep_alive:
             superbFrame = generate_output(result_queue,True,keep_alive,class_colors,darknet_width,darknet_height)
@@ -239,6 +255,8 @@ async def stream_handler(websocket: WebSocket, port: str):
         keep_alive = False
         p0.join()
         p1.join()
+        p2.join()
+        sock.close()
         manager.disconnect(websocket)
         manager.ports.discard(port)
 
