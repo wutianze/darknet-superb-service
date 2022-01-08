@@ -220,6 +220,7 @@ def generate_output(result_queue,need_bytes,keep_alive,class_colors,darknet_heig
 
 @app.websocket("/ws/{port}")# user is the received port_tmp
 async def stream_handler(websocket: WebSocket, port: str):
+    print("a new websocket connected")
     await manager.connect(websocket)
     network,class_names,class_colors = darknet.load_network(
             "./cfg/yolov4.cfg",
